@@ -1,0 +1,86 @@
+# Aviana Travel (web)
+
+A "typical travel agent website" portfolio demo — Next.js + TypeScript, deployed on Vercel — built
+around the same agentic pattern as the CLI version at `../travel_agent.py`, as a public site with
+an AI trip-planning chat widget embedded on the homepage.
+
+**No auth gate.** This was previously password-protected via a signed session cookie, but that's
+been removed for demo convenience — `/api/chat` (and the Anthropic/Voyage API usage behind it) is
+open to anyone who has the URL.
+
+## Stack
+
+- Next.js 16 (App Router, Turbopack), React 19, Tailwind CSS v4
+- `@anthropic-ai/sdk` for the agent (tool use / function calling)
+- No database, no auth
+
+## Local development
+
+```bash
+cp .env.local.example .env.local   # fill in ANTHROPIC_API_KEY
+npm install
+npm run dev
+```
+
+To enable the knowledge-base tool (see Agentic RAG below), also fill in `VOYAGE_API_KEY` and
+`BLOB_READ_WRITE_TOKEN`, then run `npm run ingest`. Without these, `search_knowledge_base` degrades
+gracefully — the agent just reports the tool is unavailable and answers from general knowledge
+instead.
+
+## Architecture
+
+- `lib/tools.ts` — `searchFlights` / `searchHotels` return deterministic **mock** data (no paid
+  travel API needed); `getWeather` calls the real, free Open-Meteo API, with a same-date-last-year
+  fallback when the trip is too far out for a forecast. Ported from `travel_agent.py` — keep both in
+  sync if the tool contracts change.
+- `lib/agent.ts` — system prompt, tool schemas, and `runAgentTurn`, the tool-use loop (capped at
+  `MAX_TOOL_ROUNDS` rounds so a pathological loop can't run away on API cost).
+- `app/api/chat/route.ts` — receives `{ messages, message }` from the client, runs the agent loop
+  server-side (so `ANTHROPIC_API_KEY` never reaches the browser), returns the updated transcript
+  and the reply text.
+- `components/ChatWidget.tsx` — the embedded chat window on the homepage. Keeps the full Anthropic
+  message transcript in client state and resends it each turn; the server does the actual agent
+  work.
+- `app/page.tsx` — the marketing site content (hero, destinations, features, testimonials) around
+  the chat widget.
+
+## Agentic RAG (knowledge base)
+
+`search_knowledge_base` is a fourth tool, alongside flights/hotels/weather, that the agent calls
+*when it decides a question needs it* — policy, fees, loyalty program, baggage, entry-document
+guidance — rather than a fixed retrieve-then-generate pipeline. It's grounded in a fictional Aviana
+policy doc at `../knowledge_base/`, shared with the CLI's copy of this same tool.
+
+Because Vercel serverless functions have no persistent disk, this doesn't use an embedded vector
+DB (that's what the CLI does with Chroma). Instead:
+
+- `scripts/ingest.mjs` (run locally, not at request time) chunks the docs in `../knowledge_base/`,
+  embeds them with Voyage AI, and uploads the result as one **private** JSON blob to Vercel Blob, at
+  the fixed pathname `knowledge-base.json` — private means it has no public URL; only a request
+  holding `BLOB_READ_WRITE_TOKEN` can read it.
+- `lib/knowledge.ts` reads that blob back via `@vercel/blob`'s `get()` once per warm serverless
+  instance, caches the parsed chunks in memory, and does brute-force cosine similarity against the
+  query embedding. Simple and dependency-free — fine at this demo's scale (one curated doc, a few
+  hundred chunks); would need a real vector index (e.g. Supabase pgvector) past that.
+
+Re-run `npm run ingest` whenever `../knowledge_base/` changes — no other env var needs updating
+since the blob path is fixed. There's no upload UI on the live site by design — the knowledge base
+is curated, not user-supplied, so a random visitor can't run up embedding costs.
+
+## Deployment
+
+Deployed to the Vercel project `agent-demo` (team `timchowdary-3180s-projects`).
+
+```bash
+vercel deploy          # preview (once a production deployment already exists)
+vercel deploy --prod   # production
+```
+
+Required environment variables (set in Vercel for both Production and Preview):
+`ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` (optional, defaults to `claude-sonnet-5`). For the
+knowledge-base tool: `VOYAGE_API_KEY` and `BLOB_READ_WRITE_TOKEN` — connecting a Blob store to the
+project in the Vercel dashboard adds the latter automatically.
+
+**Note:** a brand-new Vercel project's very first-ever deployment always becomes the Production
+deployment, regardless of the `--prod` flag — there's no "preview only" state before a production
+exists. Every deployment after that first one respects `--prod` vs. plain `vercel deploy` normally.
