@@ -22,10 +22,11 @@ npm install
 npm run dev
 ```
 
-To enable the knowledge-base tool (see Agentic RAG below), also fill in `VOYAGE_API_KEY` and
-`BLOB_READ_WRITE_TOKEN`, then run `npm run ingest`. Without these, `search_knowledge_base` degrades
-gracefully — the agent just reports the tool is unavailable and answers from general knowledge
-instead.
+To enable the knowledge-base tool, also fill in `VOYAGE_API_KEY` and `BLOB_READ_WRITE_TOKEN`, then
+run `npm run ingest`. Without these, `search_knowledge_base` degrades gracefully — the agent just
+reports the tool is unavailable and answers from general knowledge instead. For the full first-time
+setup (creating the Blob store, wiring env vars in Vercel, etc.), see the
+[repo-root README's deploy walkthrough](../README.md#deploying-the-web-app-to-vercel--step-by-step).
 
 ## Architecture
 
@@ -69,17 +70,26 @@ is curated, not user-supplied, so a random visitor can't run up embedding costs.
 
 ## Deployment
 
-Deployed to the Vercel project `agent-demo` (team `timchowdary-3180s-projects`).
+Deployed to the Vercel project `agent-demo` (team `timchowdary-3180s-projects`). For first-time
+setup — creating the project with the correct Root Directory, wiring up Blob storage, and adding
+env vars — see the [repo-root README's step-by-step guide](../README.md#deploying-the-web-app-to-vercel--step-by-step).
+This section is just the day-to-day commands.
+
+The Vercel project's **Root Directory is `web`**, and the repo root is `agent-demo/` (one level up
+from here) — so `vercel` CLI commands must run from the repo root, with `.vercel/project.json`
+living there too, not inside `web/`:
 
 ```bash
-vercel deploy          # preview (once a production deployment already exists)
+cd ..                  # repo root
+vercel deploy          # preview
 vercel deploy --prod   # production
 ```
 
 Required environment variables (set in Vercel for both Production and Preview):
 `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` (optional, defaults to `claude-sonnet-5`). For the
-knowledge-base tool: `VOYAGE_API_KEY` and `BLOB_READ_WRITE_TOKEN` — connecting a Blob store to the
-project in the Vercel dashboard adds the latter automatically.
+knowledge-base tool: `VOYAGE_API_KEY` and `BLOB_READ_WRITE_TOKEN`. **Connecting a Blob store only
+auto-adds `BLOB_STORE_ID` and `BLOB_WEBHOOK_PUBLIC_KEY`** — `BLOB_READ_WRITE_TOKEN` itself has to be
+copied in from Settings → Environment Variables separately.
 
 **Note:** a brand-new Vercel project's very first-ever deployment always becomes the Production
 deployment, regardless of the `--prod` flag — there's no "preview only" state before a production
