@@ -53,6 +53,11 @@ Deployed to the Vercel project `agent-demo` under team `timchowdary-3180s-projec
   result shape (`weatherReportSchema`) is what `components/WeatherCard.tsx` renders; keep it in
   sync with `getWeather` in `lib/tools.ts` and `get_weather` in `../travel_agent.py`. Optional
   `WEATHER_MCP_URL` switches the agent from the in-process MCP transport to Streamable HTTP.
+- Long conversations use server-side compaction (`lib/compaction.ts`, beta `compact-2026-01-12`), so
+  Claude calls go through `client.beta.messages.create` with `Anthropic.Beta.*` message types.
+  Round-trip `compaction` blocks byte-for-byte (they carry opaque `encrypted_content`), and trim
+  only before a block whose `content` is non-null. Don't reintroduce a small message-count cap in
+  `/api/chat`; that would block chats long before compaction could trigger.
 - Observability: log through `logger` from `lib/observability.ts` (one JSON line per event,
   auto-stamped with `trace_id`/`span_id`) — not `console.*`. Name events `<area>.<thing>.<verb>`
   and put `intent` (what was attempted) and `outcome` (how it ended) on the events that matter.

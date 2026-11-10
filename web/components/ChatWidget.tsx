@@ -6,7 +6,9 @@ import type { WeatherReport } from "@/lib/weatherMcp";
 import { OPEN_CHAT_EVENT } from "./chatWidgetEvents";
 import WeatherCard from "./WeatherCard";
 
-type DisplayMessage = { role: "user" | "assistant"; text: string; weather?: WeatherReport[] };
+type DisplayMessage =
+  | { role: "user" | "assistant"; text: string; weather?: WeatherReport[] }
+  | { role: "notice"; text: string };
 
 /** Random lowercase hex string of `bytes` bytes. */
 function randomHex(bytes: number) {
@@ -81,9 +83,14 @@ export default function ChatWidget() {
         throw new Error(`${data.error || "Something went wrong."} (Ref: ${ref})`);
       }
 
+      // After a compaction the server returns a transcript that starts at the summary — keep that
+      // (smaller) copy; the on-screen chat history below is untouched.
       setTranscript(data.messages);
       setDisplayMessages((prev) => [
         ...prev,
+        ...(data.compacted
+          ? [{ role: "notice" as const, text: "Earlier messages were summarized so we can keep planning — your trip details are kept." }]
+          : []),
         { role: "assistant", text: data.reply, weather: Array.isArray(data.weather) ? data.weather : [] },
       ]);
     } catch (err) {
@@ -137,7 +144,14 @@ export default function ChatWidget() {
               </div>
             )}
 
-            {displayMessages.map((m, i) => (
+            {displayMessages.map((m, i) =>
+              m.role === "notice" ? (
+                <div key={i} role="status" className="flex items-center gap-3 text-[11px] text-muted">
+                  <span className="h-px flex-1 bg-border" />
+                  <span className="text-center">{m.text}</span>
+                  <span className="h-px flex-1 bg-border" />
+                </div>
+              ) : (
               <div
                 key={i}
                 className={`flex flex-col gap-2 ${m.role === "user" ? "items-end" : "items-start"}`}
@@ -159,7 +173,8 @@ export default function ChatWidget() {
                   {m.role === "assistant" ? <ReactMarkdown>{m.text}</ReactMarkdown> : m.text}
                 </div>
               </div>
-            ))}
+              )
+            )}
 
             {loading && (
               <div className="flex justify-start">

@@ -1,4 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
+import {
+  COMPACTION_BETA,
+  COMPACTION_TRIGGER_TOKENS,
+  compactionConfig,
+  compactionInResponse,
+  trimToLatestCompaction,
+} from "./compaction";
 import { searchKnowledgeBase } from "./knowledge";
 import {
   elapsedMs,
@@ -185,10 +192,10 @@ async function openWeatherMcp(): Promise<WeatherMcpSession | null> {
 type ToolCallRecord = { name: string; ok: boolean; transport: "mcp" | "local" };
 
 async function executeTool(
-  block: Anthropic.ToolUseBlock,
+  block: Anthropic.Beta.BetaToolUseBlock,
   mcp: WeatherMcpSession | null,
   weather: WeatherReport[]
-): Promise<{ result: Anthropic.ToolResultBlockParam; record: ToolCallRecord }> {
+): Promise<{ result: Anthropic.Beta.BetaToolResultBlockParam; record: ToolCallRecord }> {
   const input = block.input as ToolInput;
   const transport = mcp?.has(block.name) ? "mcp" : "local";
 
@@ -272,9 +279,23 @@ function safeJson(text: string): unknown {
   }
 }
 
-type Usage = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number };
+type Usage = {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  /** Summarization cost — reported only in usage.iterations, not in the top-level usage. */
+  compaction_input_tokens: number;
+  compaction_output_tokens: number;
+};
 
-async function callModel(client: Anthropic, messages: Anthropic.MessageParam[], tools: Anthropic.Tool[], round: number, usage: Usage) {
+async function callModel(
+  client: Anthropic,
+  messages: Anthropic.Beta.BetaMessageParam[],
+  tools: Anthropic.Tool[],
+  round: number,
+  usage: Usage
+) {
   return withSpan(
     `chat ${MODEL}`,
     {
@@ -285,22 +306,29 @@ async function callModel(client: Anthropic, messages: Anthropic.MessageParam[], 
         "gen_ai.request.model": MODEL,
         "gen_ai.request.max_tokens": 1500,
         "app.agent.round": round,
+        "app.compaction.trigger_tokens": COMPACTION_TRIGGER_TOKENS,
       },
     },
     async (span) => {
       const start = performance.now();
       try {
-        const response = await client.messages.create({
+        const response = await client.beta.messages.create({
+          betas: [COMPACTION_BETA],
           model: MODEL,
           max_tokens: 1500,
           system: SYSTEM_PROMPT,
           tools,
           messages,
+          // Summarize older history server-side once input crosses the trigger (lib/compaction.ts).
+          context_management: compactionConfig(),
+          // Cache the growing conversation prefix: every tool round and every turn re-sends it.
+          cache_control: { type: "ephemeral" },
         });
         const toolCalls = response.content.filter((b) => b.type === "tool_use").map((b) => b.name);
         usage.input_tokens += response.usage.input_tokens;
         usage.output_tokens += response.usage.output_tokens;
         usage.cache_read_input_tokens += response.usage.cache_read_input_tokens ?? 0;
+        usage.cache_creation_input_tokens += response.usage.cache_creation_input_tokens ?? 0;
         span.setAttributes({
           "gen_ai.response.id": response.id,
           "gen_ai.response.model": response.model,
@@ -318,6 +346,7 @@ async function callModel(client: Anthropic, messages: Anthropic.MessageParam[], 
           input_tokens: response.usage.input_tokens,
           output_tokens: response.usage.output_tokens,
           cache_read_input_tokens: response.usage.cache_read_input_tokens ?? 0,
+          cache_creation_input_tokens: response.usage.cache_creation_input_tokens ?? 0,
           duration_ms: elapsedMs(start),
         });
         return response;
@@ -329,17 +358,63 @@ async function callModel(client: Anthropic, messages: Anthropic.MessageParam[], 
   );
 }
 
+/**
+ * If this response compacted the context, log/trace it and trim `messages` in place to start at
+ * the new summary (the API ignores the earlier messages from now on). Returns true on success.
+ */
+function recordCompaction(
+  response: Anthropic.Beta.BetaMessage,
+  messages: Anthropic.Beta.BetaMessageParam[],
+  round: number,
+  usage: Usage
+): boolean {
+  const event = compactionInResponse(response);
+  if (!event) return false;
+  usage.compaction_input_tokens += event.input_tokens;
+  usage.compaction_output_tokens += event.output_tokens;
+
+  if (!event.succeeded) {
+    // A null-content block is a no-op server-side; the full history stays in place.
+    logger.warn("context.compaction.failed", {
+      intent: { action: "summarize_history", trigger_tokens: COMPACTION_TRIGGER_TOKENS },
+      outcome: "no_summary",
+      round,
+      compaction_input_tokens: event.input_tokens,
+      impact: "history kept uncompacted; will retry on a later request",
+    });
+    return false;
+  }
+
+  const before = messages.length;
+  const { messages: trimmed, dropped } = trimToLatestCompaction(messages);
+  messages.splice(0, messages.length, ...trimmed);
+  logger.info("context.compacted", {
+    intent: { action: "summarize_history", trigger_tokens: COMPACTION_TRIGGER_TOKENS },
+    outcome: "summarized",
+    round,
+    context_tokens_summarized: event.input_tokens,
+    summary_tokens: event.output_tokens,
+    summary_chars: event.summary_chars,
+    messages_before: before,
+    messages_dropped: dropped,
+    messages_after: messages.length,
+  });
+  return true;
+}
+
 export type AgentTurnResult = {
-  messages: Anthropic.MessageParam[];
+  messages: Anthropic.Beta.BetaMessageParam[];
   reply: string;
   weather: WeatherReport[];
   intent: TurnIntent;
   outcome: TurnOutcome;
+  /** Successful compactions this turn (the transcript returned starts at the latest summary). */
+  compactions: number;
 };
 
 export async function runAgentTurn(
   client: Anthropic,
-  messages: Anthropic.MessageParam[],
+  messages: Anthropic.Beta.BetaMessageParam[],
   meta: { userMessage: string; conversationId?: string }
 ): Promise<AgentTurnResult> {
   return withSpan(
@@ -370,7 +445,15 @@ export async function runAgentTurn(
       // Weather reports from MCP tool calls this turn, returned alongside the reply for the UI to render.
       const weather: WeatherReport[] = [];
       const toolCalls: ToolCallRecord[] = [];
-      const usage: Usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 };
+      const usage: Usage = {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        compaction_input_tokens: 0,
+        compaction_output_tokens: 0,
+      };
+      let compactions = 0;
       let rounds = 0;
 
       const finish = (reply: string, outcome: TurnOutcome): AgentTurnResult => {
@@ -384,6 +467,7 @@ export async function runAgentTurn(
           "app.agent.rounds": rounds,
           "app.agent.tool_calls": toolCalls.length,
           "app.agent.tool_errors": toolErrors,
+          "app.compaction.count": compactions,
           "gen_ai.usage.input_tokens": usage.input_tokens,
           "gen_ai.usage.output_tokens": usage.output_tokens,
         });
@@ -399,11 +483,12 @@ export async function runAgentTurn(
           tool_errors: toolErrors,
           mcp_available: mcp !== null,
           weather_cards: weather.length,
+          compactions,
           reply_chars: reply.length,
           ...usage,
           duration_ms: elapsedMs(start),
         });
-        return { messages, reply, weather, intent, outcome };
+        return { messages, reply, weather, intent, outcome, compactions };
       };
 
       try {
@@ -411,16 +496,17 @@ export async function runAgentTurn(
           rounds = round;
           const response = await callModel(client, messages, tools, round, usage);
           messages.push({ role: "assistant", content: response.content });
+          if (recordCompaction(response, messages, round, usage)) compactions++;
 
           if (response.stop_reason !== "tool_use") {
             const reply = response.content
-              .filter((block): block is Anthropic.TextBlock => block.type === "text")
+              .filter((block): block is Anthropic.Beta.BetaTextBlock => block.type === "text")
               .map((block) => block.text)
               .join("");
             return finish(reply, inferOutcome(response.stop_reason, toolCalls.map((t) => t.name), reply));
           }
 
-          const toolResults: Anthropic.ToolResultBlockParam[] = [];
+          const toolResults: Anthropic.Beta.BetaToolResultBlockParam[] = [];
           for (const block of response.content) {
             if (block.type !== "tool_use") continue;
             const { result, record } = await executeTool(block, mcp, weather);

@@ -1,9 +1,17 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { trace } from "@opentelemetry/api";
 import { runAgentTurn } from "@/lib/agent";
+import { COMPACTION_TRIGGER_TOKENS } from "@/lib/compaction";
 import { currentTraceId, elapsedMs, logger } from "@/lib/observability";
 
-const MAX_HISTORY_MESSAGES = 60;
+/**
+ * Abuse guards for the public endpoint. Long conversations are handled by compaction
+ * (lib/compaction.ts): once the context passes COMPACTION_TRIGGER_TOKENS the API summarizes it and
+ * the transcript sent back to the browser restarts at that summary, so a legitimate transcript stays
+ * well under these limits however long the chat runs. They only stop oversized/forged payloads.
+ */
+const MAX_HISTORY_MESSAGES = 400;
+const MAX_REQUEST_BYTES = 1_500_000; // ≈ 2-3x the compaction trigger, in JSON bytes
 /** Client-generated conversation id (see ChatWidget). Validated because this endpoint is public. */
 const CONVERSATION_ID = /^[A-Za-z0-9-]{8,64}$/;
 
@@ -33,7 +41,16 @@ export async function POST(request: Request) {
     return respond({ error: "Server is missing ANTHROPIC_API_KEY." }, 500);
   }
 
-  const body = await request.json().catch(() => null);
+  const raw = await request.text().catch(() => "");
+  if (raw.length > MAX_REQUEST_BYTES) {
+    return reject(413, "request_too_large", "This conversation is too large to continue — please refresh to start a new one.");
+  }
+  let body: { messages?: unknown; message?: unknown } | null = null;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    body = null;
+  }
   const priorMessages = Array.isArray(body?.messages) ? body.messages : [];
   const userMessage = typeof body?.message === "string" ? body.message.trim() : "";
 
@@ -42,32 +59,37 @@ export async function POST(request: Request) {
     return reject(
       400,
       "history_too_long",
-      "This demo conversation has gotten long — please refresh to start a new one."
+      "This conversation is too long to continue — please refresh to start a new one."
     );
   }
 
   logger.info("chat.request.received", {
     conversation_id: conversationId,
     history_messages: priorMessages.length,
+    request_bytes: raw.length,
+    compaction_trigger_tokens: COMPACTION_TRIGGER_TOKENS,
   });
 
-  const messages: Anthropic.MessageParam[] = [...priorMessages, { role: "user", content: userMessage }];
+  const messages: Anthropic.Beta.BetaMessageParam[] = [...priorMessages, { role: "user", content: userMessage }];
 
   const client = new Anthropic({ apiKey });
   try {
-    const { messages: updated, reply, weather, intent, outcome } = await runAgentTurn(client, messages, {
+    const { messages: updated, reply, weather, intent, outcome, compactions } = await runAgentTurn(client, messages, {
       userMessage,
       conversationId,
     });
-    rootSpan?.setAttributes({ "app.intent": intent.primary, "app.outcome": outcome });
+    rootSpan?.setAttributes({ "app.intent": intent.primary, "app.outcome": outcome, "app.compaction.count": compactions });
     logger.info("chat.request.completed", {
       outcome,
       intent: intent.primary,
       status: 200,
       conversation_id: conversationId,
+      compactions,
+      transcript_messages: updated.length,
       duration_ms: elapsedMs(start),
     });
-    return respond({ messages: updated, reply, weather });
+    // `messages` restarts at the latest summary after a compaction, so the browser's copy stays small.
+    return respond({ messages: updated, reply, weather, compacted: compactions > 0 });
   } catch (err) {
     rootSpan?.setAttribute("app.outcome", "error");
     logger.error("chat.request.failed", {

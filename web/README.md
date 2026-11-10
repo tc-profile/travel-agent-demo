@@ -79,6 +79,35 @@ Re-run `npm run ingest` whenever `../knowledge_base/` changes — no other env v
 since the blob path is fixed. There's no upload UI on the live site by design — the knowledge base
 is curated, not user-supplied, so a random visitor can't run up embedding costs.
 
+## Long conversations (context compaction)
+
+Long chats are handled by the Claude API's **server-side compaction** (beta `compact-2026-01-12`),
+configured in `lib/compaction.ts`:
+
+- Every Claude call in the agent loop sends a `compact_20260112` edit. When the input reaches
+  `COMPACTION_TRIGGER_TOKENS` (default **50,000**, the API minimum), the API summarizes the earlier
+  conversation into a `compaction` block and answers from that summary. Custom summary
+  instructions make it keep what a trip planner needs: trip details, dates, budget, preferences,
+  chosen and rejected flights and hotels, weather findings, the itinerary draft, and open questions.
+- After a successful compaction, the agent drops every message before the summary
+  (`trimToLatestCompaction`). It keeps the compaction block exactly as returned, since it carries
+  opaque `encrypted_content`. The transcript returned to the browser, and re-sent on the next turn,
+  therefore stays small however long the chat runs. A failed compaction (`content: null`) trims
+  nothing.
+- The customer still sees the whole chat. The widget adds a small "Earlier messages were
+  summarized…" divider at the point where the model's context was summarized.
+- Requests also use top-level prompt caching (`cache_control: {type: "ephemeral"}`), so each tool
+  round and each turn re-reads the growing history from cache.
+- The old 60-message cap is gone. `/api/chat` now only rejects payloads far larger than a compacted
+  transcript can reach (400 messages or about 1.5 MB).
+- Observability: a `context.compacted` log (or `context.compaction.failed`) records context tokens
+  summarized, summary tokens, and messages dropped. Turn logs report `compactions` and the
+  summarizer's cost as `compaction_input_tokens` / `compaction_output_tokens`, because the API
+  reports that cost only in `usage.iterations`, not in the top-level usage.
+
+Raising `COMPACTION_TRIGGER_TOKENS` keeps more verbatim history before summarizing. The cost is that
+every request reads more input tokens.
+
 ## Observability (logs + tracing)
 
 Every chat request is traceable end to end, and every log line is structured JSON.
@@ -113,6 +142,7 @@ fails, the widget shows a short `Ref:` code taken from it.
 | `mcp.tool.completed` / `.failed` | server-side view of the same MCP call | `ok` / `error`, conditions, forecast vs estimate |
 | `llm.call.completed` / `.failed` | round, tools requested | stop reason, tokens, duration, request id |
 | `agent.turn.completed` / `.failed` | inferred intent (`trip_planning`, `policy_question`, `weather_lookup`, `general_conversation`) | `answered_with_tools`, `answered`, `clarifying_question`, `tool_limit_reached`, `refused`, `truncated`, `error`; plus `degraded` |
+| `context.compacted` / `context.compaction.failed` | summarize history at the trigger threshold | `summarized` / `no_summary`, tokens summarized, messages dropped |
 | `chat.request.received` / `.completed` / `.rejected` / `.failed` | — | HTTP status, reason, duration |
 
 Intent is **inferred from the tools the agent chose**. This costs nothing extra, gives the same
