@@ -178,6 +178,41 @@ configured in `lib/compaction.ts`:
 Raising `COMPACTION_TRIGGER_TOKENS` keeps more verbatim history before summarizing. The cost is that
 every request reads more input tokens.
 
+## Testing
+
+**Offline regression suite (`npm test`).** Vitest; runs in under a second with no network, no API
+keys, and a fixed clock (2026-11-10). Claude is replaced by a scripted fake that answers per agent,
+Open-Meteo by a `fetch` stub. Everything else is the real code.
+
+| Area | File | What it pins down |
+|---|---|---|
+| Guardrails | `tests/unit/guardrails.test.ts` | card redaction (Luhn), injection signals, tool allowlists + argument validation, output findings |
+| History & compaction | `tests/unit/history-compaction.test.ts` | text-only sanitization, forged-block stripping, summary round-trip, trigger clamping |
+| Models & routing | `tests/unit/models.test.ts` | the golden routing table, escalation, request shape (betas, fallbacks, caching, effort), cost ledger |
+| Tools | `tests/unit/tools.test.ts` | mock-data determinism + snapshots, forecast/estimate boundary, error payloads |
+| Observability | `tests/unit/observability.test.ts` | JSON log envelope, levels, `LOG_USER_CONTENT` modes, error serialization |
+| MCP | `tests/integration/weatherMcp.test.ts` | in-memory MCP session, `/api/mcp` JSON-RPC (initialize, tools/list, tools/call) |
+| Orchestrator | `tests/integration/orchestrator.test.ts` | end-to-end scenarios: routing tiers, fan-out + synthesis, blocked tools, tool limit, injection, card redaction, forged history, review/revision/escalation, safe fallback, refusals, compaction, log contract |
+| Chat API | `tests/integration/chatRoute.test.ts` | `/api/chat` response shape, history round-trip, 400/413/500 paths, no leaked internals |
+| CLI parity | `tests/contract/cliParity.test.ts` | the web agents and `../travel_agent.py` expose identical tool contracts and weather labels (skipped without python3) |
+
+**Live regression eval (`npm run eval`, opt-in, billed).** Runs the golden customer cases in
+`evals/cases.ts` against the real Claude API and real Open-Meteo. Each case checks behavior
+(routing, tools called, outcome, guardrails, reply properties), not exact wording. Universal
+invariants are also checked: non-empty reply, no blocking guardrail finding, text-only history,
+and cost per case under `EVAL_MAX_COST_USD` (default $0.50). It reads `ANTHROPIC_API_KEY` from
+`.env.local` or the shell, and skips itself without one. A JSON report goes to `evals/results/`;
+`EVAL_UPDATE_BASELINE=1` records `evals/baseline.json`, and later runs list cases that regressed
+against it. `EVAL_CASES=greeting,policy-question` runs a subset. Expect roughly $0.30–$1 per full
+run of 12 cases, depending on routing and revisions; each case's estimated cost is in the report.
+
+**CLI** (`pytest` from the repo root, after `pip install -r requirements-dev.txt`): tool registry
+sync, mock data, weather branches (faked network and clock), knowledge-base degradation, the
+agent loop, and the missing-key exit.
+
+CI (`.github/workflows/tests.yml`) runs the CLI tests plus the web lint, typecheck, and offline
+suite on every push and PR. The live eval is never run in CI.
+
 ## Observability (logs + tracing)
 
 Every chat request is traceable end to end, and every log line is structured JSON.

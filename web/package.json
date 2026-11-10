@@ -7,7 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "ingest": "node --env-file=.env.local scripts/ingest.mjs"
+    "ingest": "node --env-file=.env.local scripts/ingest.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "eval": "vitest run --config vitest.eval.config.mts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",
@@ -34,6 +37,8 @@
     "eslint-config-next": "16.2.10",
     "pdf-parse": "^1.1.4",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vite": "^7.3.8",
+    "vitest": "^4.1.12"
   }
 }

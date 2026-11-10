@@ -20,7 +20,15 @@ python ingest.py                    # optional: embed knowledge_base/ for search
 python travel_agent.py
 ```
 
-No build step, lint config, or test suite — this is a demo script, not a package.
+No build step or lint config — this is a demo script, not a package. Tests (offline, no API keys):
+
+```bash
+pip install -r requirements-dev.txt && pytest   # CLI: tests/test_travel_agent.py
+cd web && npm test                              # web: offline regression suite (also runs the CLI↔web contract test)
+cd web && npm run eval                          # web: opt-in LIVE eval against the real API (billed; needs ANTHROPIC_API_KEY)
+```
+
+CI (`.github/workflows/tests.yml`) runs pytest plus the web lint, typecheck, and `npm test` on every push and PR.
 
 ## Architecture
 

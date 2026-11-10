@@ -1,0 +1,6 @@
+# Test dependencies for the CLI agent. `chromadb` / `voyageai` aren't needed to run the tests
+# (tests/conftest.py stubs them when absent).
+pytest>=8.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+anthropic>=0.40.0

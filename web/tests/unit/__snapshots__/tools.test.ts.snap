@@ -1,0 +1,59 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`mock travel data > matches golden snapshots (catches accidental changes to the mock generators) 1`] = `
+{
+  "note": "MOCK data for demo purposes — not real bookable flights.",
+  "results": [
+    {
+      "airline": "Meridian",
+      "departs": "2026-11-14 12:45",
+      "duration_hours": 7,
+      "flight_number": "MR111",
+      "price_usd": 851,
+      "stops": 0,
+    },
+    {
+      "airline": "NorthWing",
+      "departs": "2026-11-14 16:45",
+      "duration_hours": 7,
+      "flight_number": "NW943",
+      "price_usd": 1358,
+      "stops": 0,
+    },
+    {
+      "airline": "Meridian",
+      "departs": "2026-11-14 12:15",
+      "duration_hours": 8,
+      "flight_number": "MR185",
+      "price_usd": 771,
+      "stops": 0,
+    },
+  ],
+}
+`;
+
+exports[`mock travel data > matches golden snapshots (catches accidental changes to the mock generators) 2`] = `
+{
+  "note": "MOCK data for demo purposes — not real bookable hotels.",
+  "results": [
+    {
+      "area": "Business District",
+      "name": "Harborview Inn",
+      "price_per_night_usd": 368,
+      "rating": 4.7,
+    },
+    {
+      "area": "City Center",
+      "name": "Northgate Residency",
+      "price_per_night_usd": 397,
+      "rating": 4.9,
+    },
+    {
+      "area": "Business District",
+      "name": "The Wren Hotel",
+      "price_per_night_usd": 272,
+      "rating": 4.8,
+    },
+  ],
+}
+`;

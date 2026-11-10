@@ -21,6 +21,8 @@ That means `/api/chat`, and the Anthropic/Voyage spend behind it, is open to any
 npm run dev     # dev server (Turbopack)
 npm run build   # production build
 npm run lint    # ESLint
+npm test        # offline regression suite (Vitest; no network, no API keys, fixed clock)
+npm run eval    # opt-in LIVE regression eval against the real Claude API (billed)
 npm run ingest  # embed ../knowledge_base/ docs and upload to Vercel Blob (needs .env.local)
 vercel deploy         # preview deploy (after the first production deploy exists)
 vercel deploy --prod  # production deploy
@@ -71,5 +73,13 @@ Deployed to the Vercel project `agent-demo` under team `timchowdary-3180s-projec
   Wrap meaningful units of work in `withSpan(...)`; customer-typed text goes through `userText()`
   so `LOG_USER_CONTENT` is respected. Tracing is registered in `instrumentation.ts`; see
   `README.md`'s "Observability" section.
+- Tests: `tests/` is the offline suite. `tests/helpers/fakeClaude.ts` scripts Claude per agent,
+  `openMeteo.ts` fakes `fetch`, and `logs.ts` captures the JSON logs so tests can assert on
+  events. A behavior change that makes a test fail is a regression unless it was intended; then
+  update the test, or run `npx vitest -u` for the mock-data snapshots. When adding an agent, tool,
+  guardrail, or routing rule, add a scenario to `tests/integration/orchestrator.test.ts`, and a
+  live case to `evals/cases.ts` if it's customer-visible. `vite` is pinned to ^7 in devDependencies
+  on purpose: Vite 8 bumps transitive runtime packages (`nanoid`, `source-map-js`) that Next.js
+  also uses.
 - `.env.local` and `.env*` are git-ignored; never commit real secrets. `.env.local.example` is the
   checked-in reference.
