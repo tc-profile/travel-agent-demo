@@ -12,6 +12,7 @@
  */
 
 import { get } from "@vercel/blob";
+import { logger } from "./observability";
 
 // Must match BLOB_PATH in scripts/ingest.mjs.
 const KNOWLEDGE_BASE_BLOB_PATH = "knowledge-base.json";
@@ -30,7 +31,7 @@ async function loadChunks(): Promise<KnowledgeChunk[]> {
   // it silently prefers a Vercel OIDC token over BLOB_READ_WRITE_TOKEN, which
   // 403s unless the store is explicitly connected for the current environment.
   const result = await get(KNOWLEDGE_BASE_BLOB_PATH, { access: "private", token }).catch((err) => {
-    console.warn("Failed to load knowledge base blob:", err instanceof Error ? err.message : err);
+    logger.warn("knowledge_base.load.failed", { outcome: "degraded", error: err, blob_path: KNOWLEDGE_BASE_BLOB_PATH });
     return null;
   });
   if (!result?.stream) return [];

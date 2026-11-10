@@ -8,6 +8,20 @@ import WeatherCard from "./WeatherCard";
 
 type DisplayMessage = { role: "user" | "assistant"; text: string; weather?: WeatherReport[] };
 
+/** Random lowercase hex string of `bytes` bytes. */
+function randomHex(bytes: number) {
+  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * W3C trace context header that starts a new trace in the browser for each chat request. The
+ * server (Next.js) continues it, so the whole request — route, agent loop, Claude calls, MCP tool
+ * calls — shares this trace id end to end.
+ */
+function newTraceparent() {
+  return `00-${randomHex(16)}-${randomHex(8)}-01`;
+}
+
 const SUGGESTIONS = [
   "5 days in Lisbon this June, mid-range budget",
   "Weekend trip from NYC to Montreal in October",
@@ -25,6 +39,8 @@ export default function ChatWidget() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // Groups every turn of this chat in logs/traces (gen_ai.conversation.id). Not tied to identity.
+  const conversationIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const openChat = () => setOpen(true);
@@ -47,13 +63,23 @@ export default function ChatWidget() {
     setLoading(true);
 
     try {
+      conversationIdRef.current ??= crypto.randomUUID();
+      const traceparent = newTraceparent();
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          traceparent,
+          "x-conversation-id": conversationIdRef.current,
+        },
         body: JSON.stringify({ messages: transcript, message: trimmed }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Something went wrong.");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // Short support reference: the trace id lets the team find this exact request in logs.
+        const ref = (data.traceId ?? traceparent.split("-")[1]).slice(0, 12);
+        throw new Error(`${data.error || "Something went wrong."} (Ref: ${ref})`);
+      }
 
       setTranscript(data.messages);
       setDisplayMessages((prev) => [

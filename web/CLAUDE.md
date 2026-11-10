@@ -53,5 +53,11 @@ Deployed to the Vercel project `agent-demo` under team `timchowdary-3180s-projec
   result shape (`weatherReportSchema`) is what `components/WeatherCard.tsx` renders; keep it in
   sync with `getWeather` in `lib/tools.ts` and `get_weather` in `../travel_agent.py`. Optional
   `WEATHER_MCP_URL` switches the agent from the in-process MCP transport to Streamable HTTP.
+- Observability: log through `logger` from `lib/observability.ts` (one JSON line per event,
+  auto-stamped with `trace_id`/`span_id`) — not `console.*`. Name events `<area>.<thing>.<verb>`
+  and put `intent` (what was attempted) and `outcome` (how it ended) on the events that matter.
+  Wrap meaningful units of work in `withSpan(...)`; customer-typed text goes through `userText()`
+  so `LOG_USER_CONTENT` is respected. Tracing is registered in `instrumentation.ts`; see
+  `README.md`'s "Observability" section.
 - `.env.local` and `.env*` are git-ignored; never commit real secrets. `.env.local.example` is the
   checked-in reference.

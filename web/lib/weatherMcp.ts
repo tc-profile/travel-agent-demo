@@ -15,11 +15,13 @@
  * own deployed `/api/mcp` endpoint, or any other server exposing a compatible `get_weather` tool.
  */
 import type Anthropic from "@anthropic-ai/sdk";
+import { context, propagation } from "@opentelemetry/api";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { elapsedMs, logger, SpanKind, SpanStatusCode, withSpan } from "./observability";
 import { getWeather } from "./tools";
 
 const SERVER_INFO = { name: "aviana-weather", version: "1.0.0" };
@@ -53,22 +55,56 @@ export function createWeatherMcpServer() {
       outputSchema: weatherReportSchema,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ destination, date }) => {
-      const result = await getWeather(destination, date);
-      if ("error" in result) {
-        return { isError: true, content: [{ type: "text", text: JSON.stringify(result) }] };
-      }
-      return {
-        content: [{ type: "text", text: JSON.stringify(result) }],
-        structuredContent: result,
-      };
-    }
+    async ({ destination, date }) =>
+      // Server-side span: nests under the agent's execute_tool span in-process, and under the
+      // /api/mcp request span (which continues the caller's traceparent) over HTTP.
+      withSpan(
+        "tools/call get_weather",
+        {
+          kind: SpanKind.INTERNAL,
+          attributes: {
+            "mcp.method.name": "tools/call",
+            "mcp.server.name": SERVER_INFO.name,
+            "gen_ai.tool.name": "get_weather",
+          },
+        },
+        async (span) => {
+          const start = performance.now();
+          const intent = { tool: "get_weather", args: { destination, date } };
+          const result = await getWeather(destination, date);
+          if ("error" in result) {
+            span.setStatus({ code: SpanStatusCode.ERROR, message: result.error });
+            logger.warn("mcp.tool.failed", {
+              intent,
+              outcome: "error",
+              error_message: result.error,
+              duration_ms: elapsedMs(start),
+            });
+            return { isError: true, content: [{ type: "text", text: JSON.stringify(result) }] };
+          }
+          const source = result.source === "live forecast" ? "forecast" : "last_year_estimate";
+          span.setAttributes({ "app.outcome": "ok", "app.weather.source": source });
+          logger.info("mcp.tool.completed", {
+            intent,
+            outcome: "ok",
+            location: result.location,
+            conditions: result.conditions,
+            weather_source: source,
+            duration_ms: elapsedMs(start),
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(result) }],
+            structuredContent: result,
+          };
+        }
+      )
   );
 
   return server;
 }
 
 export type WeatherMcpSession = {
+  transport: "in_memory" | "streamable_http";
   /** MCP tools translated into Anthropic tool definitions. */
   tools: Anthropic.Tool[];
   has(name: string): boolean;
@@ -84,13 +120,47 @@ export type McpToolOutcome = {
   weather?: WeatherReport;
 };
 
+/**
+ * fetch for the HTTP transport that injects the active W3C trace context (`traceparent`), so the
+ * remote MCP server's spans join the caller's trace — distributed tracing across the MCP hop.
+ */
+const tracePropagatingFetch: typeof fetch = (input, init) => {
+  const headers = new Headers(init?.headers);
+  propagation.inject(context.active(), headers, { set: (carrier, key, value) => carrier.set(key, value) });
+  return fetch(input, { ...init, headers });
+};
+
 export async function connectWeatherMcp(): Promise<WeatherMcpSession> {
+  const remoteUrl = process.env.WEATHER_MCP_URL;
+  const transport = remoteUrl ? "streamable_http" : "in_memory";
+  return withSpan(
+    "mcp.connect aviana-weather",
+    { kind: SpanKind.CLIENT, attributes: { "mcp.transport": transport, "mcp.server.name": SERVER_INFO.name } },
+    async (span) => {
+      const start = performance.now();
+      const session = await openSession(remoteUrl, transport);
+      span.setAttribute("mcp.tools.count", session.tools.length);
+      logger.info("mcp.connect.completed", {
+        outcome: "ok",
+        transport,
+        server_url: remoteUrl ? new URL(remoteUrl).origin + new URL(remoteUrl).pathname : undefined,
+        tools: session.tools.map((t) => t.name),
+        duration_ms: elapsedMs(start),
+      });
+      return session;
+    }
+  );
+}
+
+async function openSession(
+  remoteUrl: string | undefined,
+  transport: WeatherMcpSession["transport"]
+): Promise<WeatherMcpSession> {
   const client = new Client({ name: "aviana-trip-planner", version: "1.0.0" });
 
-  const remoteUrl = process.env.WEATHER_MCP_URL;
   let closeServer: (() => Promise<void>) | undefined;
   if (remoteUrl) {
-    await client.connect(new StreamableHTTPClientTransport(new URL(remoteUrl)));
+    await client.connect(new StreamableHTTPClientTransport(new URL(remoteUrl), { fetch: tracePropagatingFetch }));
   } else {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const server = createWeatherMcpServer();
@@ -116,6 +186,7 @@ export async function connectWeatherMcp(): Promise<WeatherMcpSession> {
   const names = new Set(tools.map((t) => t.name));
 
   return {
+    transport,
     tools,
     has: (name) => names.has(name),
     async call(name, input) {
