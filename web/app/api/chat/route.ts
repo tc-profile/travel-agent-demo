@@ -27,8 +27,8 @@ export async function POST(request: Request) {
 
   const client = new Anthropic({ apiKey });
   try {
-    const { messages: updated, reply } = await runAgentTurn(client, messages);
-    return Response.json({ messages: updated, reply });
+    const { messages: updated, reply, weather } = await runAgentTurn(client, messages);
+    return Response.json({ messages: updated, reply, weather });
   } catch (err) {
     console.error("agent turn failed", err);
     return Response.json({ error: "Something went wrong talking to the agent." }, { status: 500 });

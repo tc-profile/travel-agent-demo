@@ -34,14 +34,25 @@ setup (creating the Blob store, wiring env vars in Vercel, etc.), see the
   travel API needed); `getWeather` calls the real, free Open-Meteo API, with a same-date-last-year
   fallback when the trip is too far out for a forecast. Ported from `travel_agent.py` — keep both in
   sync if the tool contracts change.
-- `lib/agent.ts` — system prompt, tool schemas, and `runAgentTurn`, the tool-use loop (capped at
-  `MAX_TOOL_ROUNDS` rounds so a pathological loop can't run away on API cost).
+- `lib/weatherMcp.ts` — weather over **MCP**. `createWeatherMcpServer()` wraps `getWeather` as an
+  MCP tool (`get_weather`, with an `outputSchema` / `structuredContent` result);
+  `connectWeatherMcp()` is the agent's MCP client — it discovers tools via `tools/list` and runs
+  Claude's calls via `tools/call`. Connects in-process (MCP in-memory transport) by default, or to
+  a remote server over Streamable HTTP when `WEATHER_MCP_URL` is set.
+- `app/api/mcp/route.ts` — the same weather MCP server published at `/api/mcp` (stateless
+  Streamable HTTP), usable from any MCP client (e.g. MCP Inspector, Claude Desktop) or as
+  `WEATHER_MCP_URL`. Unauthenticated, but only fronts the free Open-Meteo API.
+- `lib/agent.ts` — system prompt, local tool schemas, and `runAgentTurn`, the tool-use loop (capped
+  at `MAX_TOOL_ROUNDS` rounds so a pathological loop can't run away on API cost). Merges the MCP
+  server's tools into the tool list each turn and collects weather results for the UI; if the MCP
+  server can't be reached the agent keeps working without weather.
 - `app/api/chat/route.ts` — receives `{ messages, message }` from the client, runs the agent loop
-  server-side (so `ANTHROPIC_API_KEY` never reaches the browser), returns the updated transcript
-  and the reply text.
+  server-side (so `ANTHROPIC_API_KEY` never reaches the browser), returns the updated transcript,
+  the reply text, and any `weather` reports fetched over MCP that turn.
 - `components/ChatWidget.tsx` — the embedded chat window on the homepage. Keeps the full Anthropic
   message transcript in client state and resends it each turn; the server does the actual agent
-  work.
+  work. Renders each MCP weather report as a card (`components/WeatherCard.tsx`) above
+  the assistant's reply.
 - `app/page.tsx` — the marketing site content (hero, destinations, features, testimonials) around
   the chat widget.
 

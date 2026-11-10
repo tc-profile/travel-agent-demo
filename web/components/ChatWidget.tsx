@@ -2,9 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import type { WeatherReport } from "@/lib/weatherMcp";
 import { OPEN_CHAT_EVENT } from "./chatWidgetEvents";
+import WeatherCard from "./WeatherCard";
 
-type DisplayMessage = { role: "user" | "assistant"; text: string };
+type DisplayMessage = { role: "user" | "assistant"; text: string; weather?: WeatherReport[] };
 
 const SUGGESTIONS = [
   "5 days in Lisbon this June, mid-range budget",
@@ -54,7 +56,10 @@ export default function ChatWidget() {
       if (!res.ok) throw new Error(data.error || "Something went wrong.");
 
       setTranscript(data.messages);
-      setDisplayMessages((prev) => [...prev, { role: "assistant", text: data.reply }]);
+      setDisplayMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: data.reply, weather: Array.isArray(data.weather) ? data.weather : [] },
+      ]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
@@ -107,7 +112,17 @@ export default function ChatWidget() {
             )}
 
             {displayMessages.map((m, i) => (
-              <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+              <div
+                key={i}
+                className={`flex flex-col gap-2 ${m.role === "user" ? "items-end" : "items-start"}`}
+              >
+                {m.weather && m.weather.length > 0 && (
+                  <div className="w-full max-w-[85%] space-y-2" aria-label="Weather details">
+                    {m.weather.map((w, j) => (
+                      <WeatherCard key={`${w.location}-${w.date}-${j}`} report={w} />
+                    ))}
+                  </div>
+                )}
                 <div
                   className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
                     m.role === "user"

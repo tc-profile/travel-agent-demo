@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { searchKnowledgeBase } from "./knowledge";
-import { getWeather, searchFlights, searchHotels } from "./tools";
+import { searchFlights, searchHotels } from "./tools";
+import { connectWeatherMcp, type WeatherMcpSession, type WeatherReport } from "./weatherMcp";
 
 const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5";
 
@@ -21,7 +22,9 @@ note based on the weather.
 Flight and hotel data are clearly-labeled MOCK data for this demo — say so
 plainly if the user asks whether they can book through you (they can't).
 Weather data is real (or, when the date is too far out for a forecast, an
-estimate based on the same date last year — say so when you use it).
+estimate based on the same date last year — say so when you use it). Each
+get_weather result is also shown to the customer as a weather card next to
+your reply, so summarize it briefly rather than repeating every number.
 
 You also have access to search_knowledge_base, which searches Aviana's own
 reference documents (booking/cancellation policy, loyalty program, baggage
@@ -33,6 +36,7 @@ to your general knowledge and say the answer isn't from Aviana's documents.
 Keep responses concise and skimmable: short paragraphs, bullet points for
 options and itinerary days. Format with markdown.`;
 
+/** Locally-implemented tools. get_weather is NOT here — it's discovered from the weather MCP server (lib/weatherMcp.ts). */
 export const TOOLS: Anthropic.Tool[] = [
   {
     name: "search_flights",
@@ -64,19 +68,6 @@ export const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
-    name: "get_weather",
-    description:
-      "Get real weather for a destination on a given date, via Open-Meteo. Uses a live forecast if the date is within ~16 days; otherwise falls back to actual weather from the same date last year as an estimate.",
-    input_schema: {
-      type: "object",
-      properties: {
-        destination: { type: "string", description: "Destination city" },
-        date: { type: "string", description: "Date, YYYY-MM-DD" },
-      },
-      required: ["destination", "date"],
-    },
-  },
-  {
     name: "search_knowledge_base",
     description:
       "Search Aviana's own reference documents — booking/cancellation policy, loyalty program, baggage rules, entry-document guidance, group bookings, customer support — for a relevant passage. Use for policy/fee/program questions instead of guessing.",
@@ -102,49 +93,81 @@ const TOOL_FUNCTIONS: Record<string, (input: ToolInput) => unknown | Promise<unk
       i.checkout as string,
       i.max_price_per_night as number | undefined
     ),
-  get_weather: (i) => getWeather(i.destination as string, i.date as string),
   search_knowledge_base: (i) => searchKnowledgeBase(i.query as string, (i.top_k as number) ?? 4),
 };
 
-export async function runAgentTurn(client: Anthropic, messages: Anthropic.MessageParam[]) {
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 1500,
-      system: SYSTEM_PROMPT,
-      tools: TOOLS,
-      messages,
-    });
-    messages.push({ role: "assistant", content: response.content });
-
-    if (response.stop_reason !== "tool_use") {
-      const reply = response.content
-        .filter((block): block is Anthropic.TextBlock => block.type === "text")
-        .map((block) => block.text)
-        .join("");
-      return { messages, reply };
-    }
-
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    for (const block of response.content) {
-      if (block.type !== "tool_use") continue;
-      let result: unknown;
-      try {
-        result = await TOOL_FUNCTIONS[block.name](block.input as ToolInput);
-      } catch (err) {
-        result = { error: err instanceof Error ? err.message : String(err) };
-      }
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: block.id,
-        content: JSON.stringify(result),
-      });
-    }
-    messages.push({ role: "user", content: toolResults });
+/** Opens the weather MCP session; if it can't connect, the agent still runs, just without weather. */
+async function openWeatherMcp(): Promise<WeatherMcpSession | null> {
+  try {
+    return await connectWeatherMcp();
+  } catch (err) {
+    console.warn("weather MCP server unavailable — continuing without get_weather", err);
+    return null;
   }
+}
 
-  return {
-    messages,
-    reply: "I wasn't able to finish planning this within the demo's tool-call limit — try narrowing your request.",
-  };
+export async function runAgentTurn(client: Anthropic, messages: Anthropic.MessageParam[]) {
+  const mcp = await openWeatherMcp();
+  const tools = [...TOOLS, ...(mcp?.tools ?? [])];
+  // Weather reports from MCP tool calls this turn, returned alongside the reply for the UI to render.
+  const weather: WeatherReport[] = [];
+
+  try {
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const response = await client.messages.create({
+        model: MODEL,
+        max_tokens: 1500,
+        system: SYSTEM_PROMPT,
+        tools,
+        messages,
+      });
+      messages.push({ role: "assistant", content: response.content });
+
+      if (response.stop_reason !== "tool_use") {
+        const reply = response.content
+          .filter((block): block is Anthropic.TextBlock => block.type === "text")
+          .map((block) => block.text)
+          .join("");
+        return { messages, reply, weather };
+      }
+
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      for (const block of response.content) {
+        if (block.type !== "tool_use") continue;
+        const input = block.input as ToolInput;
+        try {
+          if (mcp?.has(block.name)) {
+            const outcome = await mcp.call(block.name, input);
+            if (outcome.weather) weather.push(outcome.weather);
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: block.id,
+              content: outcome.text,
+              is_error: outcome.isError || undefined,
+            });
+            continue;
+          }
+          const fn = TOOL_FUNCTIONS[block.name];
+          if (!fn) throw new Error(`Unknown tool '${block.name}'.`);
+          toolResults.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(await fn(input)) });
+        } catch (err) {
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+            is_error: true,
+          });
+        }
+      }
+      messages.push({ role: "user", content: toolResults });
+    }
+
+    return {
+      messages,
+      reply: "I wasn't able to finish planning this within the demo's tool-call limit — try narrowing your request.",
+      weather,
+    };
+  } finally {
+    await mcp?.close().catch(() => {});
+  }
 }

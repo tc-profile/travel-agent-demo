@@ -48,5 +48,10 @@ Deployed to the Vercel project `agent-demo` under team `timchowdary-3180s-projec
   `BLOB_READ_WRITE_TOKEN` when both are available — and that OIDC token 403s unless the store is
   explicitly connected for the current environment, which fails silently (caught, returns `[]`)
   unless you're watching for the `console.warn` in `lib/knowledge.ts`.
+- `get_weather` is served by an MCP server (`lib/weatherMcp.ts`, also exposed at `/api/mcp`), not
+  defined in `lib/agent.ts`'s `TOOLS` — the agent discovers it via MCP `tools/list` each turn. Its
+  result shape (`weatherReportSchema`) is what `components/WeatherCard.tsx` renders; keep it in
+  sync with `getWeather` in `lib/tools.ts` and `get_weather` in `../travel_agent.py`. Optional
+  `WEATHER_MCP_URL` switches the agent from the in-process MCP transport to Streamable HTTP.
 - `.env.local` and `.env*` are git-ignored; never commit real secrets. `.env.local.example` is the
   checked-in reference.

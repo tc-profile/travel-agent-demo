@@ -197,6 +197,20 @@ def search_hotels(destination, checkin, checkout, max_price_per_night=None):
 # Real weather tool (Open-Meteo, no API key required)
 # ---------------------------------------------------------------------------
 
+# WMO weather interpretation codes (Open-Meteo's `weather_code`) -> short label.
+# Keep in sync with WMO_CONDITIONS in web/lib/tools.ts.
+_WMO_CONDITIONS = {
+    0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+    45: "Fog", 48: "Freezing fog",
+    51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle", 56: "Freezing drizzle", 57: "Freezing drizzle",
+    61: "Light rain", 63: "Rain", 65: "Heavy rain", 66: "Freezing rain", 67: "Freezing rain",
+    71: "Light snow", 73: "Snow", 75: "Heavy snow", 77: "Snow grains",
+    80: "Rain showers", 81: "Rain showers", 82: "Violent rain showers",
+    85: "Snow showers", 86: "Heavy snow showers",
+    95: "Thunderstorm", 96: "Thunderstorm with hail", 99: "Thunderstorm with hail",
+}
+
+
 def _geocode(place):
     resp = requests.get(
         "https://geocoding-api.open-meteo.com/v1/search",
@@ -229,7 +243,7 @@ def get_weather(destination, date_str):
             "https://api.open-meteo.com/v1/forecast",
             params={
                 "latitude": lat, "longitude": lon,
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum",
                 "timezone": "auto",
                 "start_date": date_str, "end_date": date_str,
             },
@@ -243,7 +257,7 @@ def get_weather(destination, date_str):
             "https://archive-api.open-meteo.com/v1/archive",
             params={
                 "latitude": lat, "longitude": lon,
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum",
                 "timezone": "auto",
                 "start_date": estimate_date.isoformat(), "end_date": estimate_date.isoformat(),
             },
@@ -256,10 +270,13 @@ def get_weather(destination, date_str):
     if not daily or not daily.get("time"):
         return {"error": "No weather data available for that date/location."}
 
+    code = (daily.get("weather_code") or [None])[0]
     return {
         "location": f"{resolved_name}, {country}",
         "date": date_str,
         "source": source,
+        "weather_code": code,
+        "conditions": _WMO_CONDITIONS.get(code, "Unknown"),
         "temp_max_c": daily["temperature_2m_max"][0],
         "temp_min_c": daily["temperature_2m_min"][0],
         "precipitation_mm": daily["precipitation_sum"][0],
