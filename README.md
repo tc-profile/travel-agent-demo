@@ -117,7 +117,7 @@ In the Vercel dashboard: Project → **Settings → Environment Variables**. Add
 | Variable | Value |
 |---|---|
 | `ANTHROPIC_API_KEY` | from console.anthropic.com |
-| `ANTHROPIC_MODEL` | optional, defaults to `claude-sonnet-5` |
+| `MODEL_FAST` / `MODEL_BALANCED` / `MODEL_DEEP` | optional; default `claude-haiku-5-5` / `claude-sonnet-5-5` / `claude-opus-5-5` (the web app routes across these; `ANTHROPIC_MODEL` is CLI-only) |
 
 ### Step 5 — Create and connect a Vercel Blob store (for agentic RAG)
 

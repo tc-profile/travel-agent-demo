@@ -6,8 +6,17 @@ import type { WeatherReport } from "@/lib/weatherMcp";
 import { OPEN_CHAT_EVENT } from "./chatWidgetEvents";
 import WeatherCard from "./WeatherCard";
 
+/** Which agents answered, on which models, and whether the answer passed self-review. */
+type AgentMeta = { agents: { name: string; model: string }[]; review: string; escalated: boolean };
+
+const REVIEW_LABEL: Record<string, string> = {
+  passed: "self-checked ✓",
+  revised: "revised after review",
+  fallback_reply: "held back by guardrails",
+};
+
 type DisplayMessage =
-  | { role: "user" | "assistant"; text: string; weather?: WeatherReport[] }
+  | { role: "user" | "assistant"; text: string; weather?: WeatherReport[]; meta?: AgentMeta }
   | { role: "notice"; text: string };
 
 /** Random lowercase hex string of `bytes` bytes. */
@@ -91,7 +100,12 @@ export default function ChatWidget() {
         ...(data.compacted
           ? [{ role: "notice" as const, text: "Earlier messages were summarized so we can keep planning — your trip details are kept." }]
           : []),
-        { role: "assistant", text: data.reply, weather: Array.isArray(data.weather) ? data.weather : [] },
+        {
+          role: "assistant",
+          text: data.reply,
+          weather: Array.isArray(data.weather) ? data.weather : [],
+          meta: data.meta,
+        },
       ]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
@@ -172,6 +186,13 @@ export default function ChatWidget() {
                 >
                   {m.role === "assistant" ? <ReactMarkdown>{m.text}</ReactMarkdown> : m.text}
                 </div>
+                {m.role === "assistant" && m.meta?.agents?.length ? (
+                  <p className="max-w-[85%] px-1 text-[10px] text-muted">
+                    {m.meta.agents.map((a) => `${a.name} · ${a.model}`).join(" + ")}
+                    {m.meta.escalated ? " · escalated" : ""}
+                    {REVIEW_LABEL[m.meta.review] ? ` · ${REVIEW_LABEL[m.meta.review]}` : ""}
+                  </p>
+                ) : null}
               </div>
               )
             )}

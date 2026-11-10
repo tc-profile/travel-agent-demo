@@ -42,10 +42,8 @@ setup (creating the Blob store, wiring env vars in Vercel, etc.), see the
 - `app/api/mcp/route.ts` — the same weather MCP server published at `/api/mcp` (stateless
   Streamable HTTP), usable from any MCP client (e.g. MCP Inspector, Claude Desktop) or as
   `WEATHER_MCP_URL`. Unauthenticated, but only fronts the free Open-Meteo API.
-- `lib/agent.ts` — system prompt, local tool schemas, and `runAgentTurn`, the tool-use loop (capped
-  at `MAX_TOOL_ROUNDS` rounds so a pathological loop can't run away on API cost). Merges the MCP
-  server's tools into the tool list each turn and collects weather results for the UI; if the MCP
-  server can't be reached the agent keeps working without weather.
+- `lib/agents/` — the multi-agent system (see "Multi-agent architecture" below). `lib/agent.ts`
+  re-exports its entry point, `runAgentTurn`.
 - `app/api/chat/route.ts` — receives `{ messages, message }` from the client, runs the agent loop
   server-side (so `ANTHROPIC_API_KEY` never reaches the browser), returns the updated transcript,
   the reply text, and any `weather` reports fetched over MCP that turn.
@@ -78,6 +76,78 @@ DB (that's what the CLI does with Chroma). Instead:
 Re-run `npm run ingest` whenever `../knowledge_base/` changes — no other env var needs updating
 since the blob path is fixed. There's no upload UI on the live site by design — the knowledge base
 is curated, not user-supplied, so a random visitor can't run up embedding costs.
+
+## Multi-agent architecture
+
+The single tool-using agent is now a team of agents in `lib/agents/`, coordinated per turn by
+`orchestrator.ts`:
+
+```
+customer message
+ └─ input guardrails (rules: size cap, card-number redaction, injection heuristics)
+     └─ router — Haiku 5.5, structured JSON: safety verdict, intent, complexity, 1–3 tasks
+         ├─ unsafe / prompt_injection → canned reply (no specialist runs)
+         └─ specialists, in parallel, each on the tier the routing table picks
+              trip_planner (flights, hotels, weather) · policy_expert (knowledge base)
+              weather_specialist (weather) · concierge (no tools)
+             └─ synthesizer — merges answers when more than one specialist ran
+                 └─ output guardrails (rules) → evaluator (judge model, rubric, JSON scores)
+                     └─ on fail: one revision with the judge's feedback, escalated a tier
+                        when any score ≤ 2 → final guardrail check → reply
+```
+
+**Strategic model routing** (`models.ts`). The router classifies; code picks the model, so routing
+is cheap, deterministic, auditable, and easy to change:
+
+| Agent | simple | standard | complex |
+|---|---|---|---|
+| trip_planner | Sonnet 5.5 · low | Sonnet 5.5 · medium | **Opus 5.5** · medium |
+| policy_expert | Haiku 5.5 · medium | Sonnet 5.5 · low | Sonnet 5.5 · medium |
+| weather_specialist | Haiku 5.5 · low | Haiku 5.5 · medium | Sonnet 5.5 · low |
+| concierge | Haiku 5.5 · low | Haiku 5.5 · low | Haiku 5.5 · medium |
+| router | Haiku 5.5 · low (always) | | |
+| synthesizer | Sonnet 5.5 · low (Opus 5.5 when escalated) | | |
+| evaluator | Sonnet 5.5 · medium; Opus 5.5 when judging Opus output | | |
+
+Tiers are set by `MODEL_FAST` (default `claude-haiku-5-5`), `MODEL_BALANCED` (`claude-sonnet-5-5`)
+and `MODEL_DEEP` (`claude-opus-5-5`). Sonnet and Opus requests carry a server-side **refusal
+fallback** to `claude-opus-4-8` (beta `server-side-fallback-2026-06-01`; `REFUSAL_FALLBACKS=off` to
+disable, `REFUSAL_FALLBACK_MODEL` to change). Haiku has no server-side fallback. Every turn logs a
+per-model token and estimated-cost ledger (`agent.turn.completed` → `cost`).
+
+**Guardrails** (`guardrails.ts`). These are rules, not model calls, so they can't be talked around:
+
+- **Input:** messages over 4,000 characters are refused. Luhn-valid card numbers are redacted before
+  any model sees them, and the reply adds a notice. Prompt-injection patterns are passed to the
+  router as signals, and the router makes the call.
+- **Tool:** each specialist may call only its allowlisted tools. Arguments are validated (real
+  dates, no past flight or check-in dates, checkout after checkin, at most 30 nights, sane
+  `top_k`). A blocked call comes back as an error result, so the agent corrects itself.
+- **Output:** checks for booking or confirmation claims, flight numbers or hotel names that no tool
+  returned, a booking request answered without the mock-data disclosure, and card numbers in the
+  reply. A "block" finding that survives revision replaces the reply with a safe fallback.
+- **History:** the browser-held transcript is reduced to customer text, assistant text, and
+  compaction summaries (`history.ts`). Forged tool results, thinking blocks, or system messages are
+  dropped.
+
+**Self-evaluation** (`evaluator.ts`). The judge scores each draft from 1 to 5 on whether it
+addresses the request, is grounded in tool evidence, makes honest disclosures (mock data, weather
+estimates, sources), is safe, and is clear. It sees the tool evidence and the guardrail findings.
+Pass means verdict `pass`, every score ≥ 3, and no blocking finding. Otherwise the draft is revised
+once: the specialist continues its own transcript with the feedback, or the synthesizer re-merges.
+The revision moves up a tier when a score is ≤ 2. `EVAL_MODE=auto` (default) reviews trip-planner
+and policy answers plus anything a guardrail flagged; `always` / `off` are also available.
+`EVAL_MAX_REVISIONS` defaults to 1 (max 2).
+
+**Why the shared history is text-only.** Each specialist's tool calls and thinking stay inside its
+own run on one model. The conversation the browser stores holds only text and compaction summaries,
+so routing later turns to a different model never replays one model's thinking or tool blocks into
+another. Compaction still applies: when a specialist's request compacts, the history restarts at
+that summary. The tradeoff is that raw tool payloads from earlier turns aren't kept; their substance
+survives through the replies and summaries.
+
+The widget's caption under each reply shows who answered and how it was checked, e.g.
+`Trip Planner · Opus 5.5 + Policy Expert · Sonnet 5.5 · revised after review`.
 
 ## Long conversations (context compaction)
 
@@ -181,7 +251,8 @@ vercel deploy --prod   # production
 ```
 
 Required environment variables (set in Vercel for both Production and Preview):
-`ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` (optional, defaults to `claude-sonnet-5`). For the
+`ANTHROPIC_API_KEY`; optionally `MODEL_FAST` / `MODEL_BALANCED` / `MODEL_DEEP` (see "Multi-agent
+architecture"; `ANTHROPIC_MODEL` is CLI-only and ignored by the web app). For the
 knowledge-base tool: `VOYAGE_API_KEY` and `BLOB_READ_WRITE_TOKEN`. **Connecting a Blob store only
 auto-adds `BLOB_STORE_ID` and `BLOB_WEBHOOK_PUBLIC_KEY`** — `BLOB_READ_WRITE_TOKEN` itself has to be
 copied in from Settings → Environment Variables separately.

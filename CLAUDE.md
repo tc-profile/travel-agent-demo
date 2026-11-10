@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A portfolio demo of an agentic AI pattern: a single-file Python CLI (`travel_agent.py`) that uses the Anthropic Claude API's tool use (function calling) to plan a trip through multi-turn conversation.
 
+The CLI is a single agent. The web version runs a multi-agent system: a router, specialists, model-tier routing, guardrails, and self-evaluation (`web/lib/agents/`).
+
 There's also a web version in `web/` — a full "Aviana Travel" website (Next.js, deployed on Vercel) with a password-gated homepage and the same agent embedded as a chat widget. See `web/CLAUDE.md` and `web/README.md` for that side; keep `web/lib/tools.ts` in sync with this file's tool contracts if either changes. On the web side, `get_weather` is served to the agent through an MCP server (`web/lib/weatherMcp.ts`, also public at `/api/mcp`) and rendered as weather cards in the chat widget.
 
 ## Commands

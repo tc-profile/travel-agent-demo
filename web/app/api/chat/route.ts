@@ -70,11 +70,10 @@ export async function POST(request: Request) {
     compaction_trigger_tokens: COMPACTION_TRIGGER_TOKENS,
   });
 
-  const messages: Anthropic.Beta.BetaMessageParam[] = [...priorMessages, { role: "user", content: userMessage }];
-
   const client = new Anthropic({ apiKey });
   try {
-    const { messages: updated, reply, weather, intent, outcome, compactions } = await runAgentTurn(client, messages, {
+    // History is sanitized inside the agent (text + compaction summaries only).
+    const { messages: updated, reply, weather, intent, outcome, compactions, meta } = await runAgentTurn(client, priorMessages, {
       userMessage,
       conversationId,
     });
@@ -82,6 +81,7 @@ export async function POST(request: Request) {
     logger.info("chat.request.completed", {
       outcome,
       intent: intent.primary,
+      review: meta.review,
       status: 200,
       conversation_id: conversationId,
       compactions,
@@ -89,7 +89,7 @@ export async function POST(request: Request) {
       duration_ms: elapsedMs(start),
     });
     // `messages` restarts at the latest summary after a compaction, so the browser's copy stays small.
-    return respond({ messages: updated, reply, weather, compacted: compactions > 0 });
+    return respond({ messages: updated, reply, weather, compacted: compactions > 0, meta });
   } catch (err) {
     rootSpan?.setAttribute("app.outcome", "error");
     logger.error("chat.request.failed", {

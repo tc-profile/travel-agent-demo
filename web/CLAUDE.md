@@ -33,7 +33,14 @@ Deployed to the Vercel project `agent-demo` under team `timchowdary-3180s-projec
 - Keep `lib/tools.ts` in sync with `../travel_agent.py`'s tool contracts if either changes — same
   mock-data shape and the same Open-Meteo fallback logic. Same for `lib/knowledge.ts` and
   `../ingest.py`'s chunking (size/overlap) if either changes.
-- Agentic RAG: `search_knowledge_base` (in `lib/knowledge.ts`, wired into `lib/agent.ts`) is a
+- Multi-agent: `lib/agents/` (router → specialists → synthesizer → guardrails + evaluator; see
+  README "Multi-agent architecture"). Models are chosen by `routeModel()`'s table in
+  `lib/agents/models.ts`. Don't hard-code model IDs elsewhere, and route every Claude call
+  through `callClaude()` (spans, logs, cost ledger, fallbacks, compaction). A new tool needs an
+  entry in `TOOL_ALLOWLIST` (guardrails.ts) for the agent that may call it, plus argument checks in
+  `checkToolCall`. Keep the shared history text-only (`history.ts`): never put tool or thinking
+  blocks into the messages returned to the browser.
+- Agentic RAG: `search_knowledge_base` (in `lib/knowledge.ts`, used by the `policy_expert` agent) is a
   fourth tool the agent calls at its own discretion — not a fixed retrieve-then-generate pipeline.
   It reads a precomputed embeddings JSON blob from Vercel Blob (private access, fixed pathname
   `knowledge-base.json`, read via `@vercel/blob`'s `get()`) rather than using a vector DB, since
@@ -49,7 +56,7 @@ Deployed to the Vercel project `agent-demo` under team `timchowdary-3180s-projec
   explicitly connected for the current environment, which fails silently (caught, returns `[]`)
   unless you're watching for the `console.warn` in `lib/knowledge.ts`.
 - `get_weather` is served by an MCP server (`lib/weatherMcp.ts`, also exposed at `/api/mcp`), not
-  defined in `lib/agent.ts`'s `TOOLS` — the agent discovers it via MCP `tools/list` each turn. Its
+  defined in `lib/agents/specialists.ts`'s `LOCAL_TOOLS` — agents discover it via MCP `tools/list` each turn. Its
   result shape (`weatherReportSchema`) is what `components/WeatherCard.tsx` renders; keep it in
   sync with `getWeather` in `lib/tools.ts` and `get_weather` in `../travel_agent.py`. Optional
   `WEATHER_MCP_URL` switches the agent from the in-process MCP transport to Streamable HTTP.
